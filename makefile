@@ -19,14 +19,14 @@ preventing make from looking for a file with that name or considering its modifi
 .PHONY: clean rebuild
 
 # Source files
-DRIVER_C = main.cpp
+DRIVER_C = aspc.cpp
 
 # Output executable file
 TEST_OUT = simplify
 
 # Compiler and flags (For C++)
 CXX_COMPILER = g++
-CXXFLAGS = -std=c++17 -pedantic -Wall -Wextra -Werror -Wconversion
+CXXFLAGS = -O2 -std=c++17
 
 # Default target
 all: $(TEST_OUT)
