@@ -9,7 +9,6 @@
 Within the git repo, the Input and Expected Output test cases have already been uploaded.
 Therefore, after running the "make" command, run the function
 
-# The folder path to the correct folder for testing is currently hardcoded to look into
-# the "Input_Files" folder
+# The folder path to the correct folder for testing is currently hardcoded to look into the "Input_Files" folder
 # Hardcoded line can be found in line 391 of the read_csv function
 3. ./simplify <input.csv> <target_vertices>
