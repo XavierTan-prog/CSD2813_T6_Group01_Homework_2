@@ -16,15 +16,15 @@ rather than actual files that make should create or update.                     
 Declaring it as .PHONY explicitly tells make that it's a command,                          \
 preventing make from looking for a file with that name or considering its modification time \
 #
-.PHONY: clean rebuild
+.PHONY: clean rebuild all
 
 # Source files
-DRIVER_C = aspc.cpp
+DRIVER_C = apsc.cpp
 
 # Output executable file
 TEST_OUT = simplify
 
-# Compiler and flags (For C++)
+# Compiler and flags
 CXX_COMPILER = g++
 CXXFLAGS = -O2 -std=c++17
 
@@ -35,15 +35,11 @@ all: $(TEST_OUT)
 $(TEST_OUT): $(DRIVER_C)
 	$(CXX_COMPILER) $(CXXFLAGS) $(DRIVER_C) -o $(TEST_OUT)
 
-#------------------------------------------------------------------------------#
-# REMOVES ALL FILES SPWANED FROM MAKEFILE
+# Remove all files spawned from Makefile
 clean:
 	rm -f $(TEST_OUT)
-#------------------------------------------------------------------------------#
 
 # Rebuild
-#--------------- !!!WARNING!!! ---------------#
-# Using make rebuild command will rebuild the ENTIRE executable
-#--------------- !!!WARNING!!! ---------------#
 rebuild:
-	clean
+	$(MAKE) clean
+	$(MAKE) all
