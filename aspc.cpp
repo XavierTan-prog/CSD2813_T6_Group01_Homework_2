@@ -50,7 +50,7 @@
 
 #include <algorithm>
 #include <cassert>
-#include <chrono>
+// #include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -65,23 +65,52 @@
 #include <unordered_map>
 #include <vector>
 
+// EPS here is used to help with comparing if the initial and final areas match
+// this is due to rounding errors when comparing doubles directly with each other
 static const double EPS = 1e-9;
-static const double PI  = std::acos(-1.0);  // portable, exact to double precision
+// PI here is used as compared to M_PI as it is more portable to use as compared to
+// the non-standardization of M_PI across systems
+static const double PI  = std::acos(-1.0);
+// Coordinates of the vertices
 struct Point { double x, y; };
 
-// ─── geometry ────────────────────────────────────────────────────────────────
+// ─── GEOMETRY ────────────────────────────────────────────────────────────────
 
+// This function is to compute the 2D cross product of vectors OA and OB
+// where the output will determine if OA to OB is counter-clockwise (positive),
+// clockwise (negative) or collinear (zero)
 inline double cross2(const Point& O,const Point& A,const Point& B){
     return (A.x-O.x)*(B.y-O.y)-(A.y-O.y)*(B.x-O.x);
 }
+
+// This function helps to convert the raw floating point value into a discrete
+// "sign" such that comparisons do not break due to small numerical errors
+// ---
+// This function will return +1, -1 or 0 depending on whether the input value d
+// is clearly positive, negative or within the EPS check of zero
 inline int sgn(double d){ return d>EPS?1:(d<-EPS?-1:0); }
+
+// This function is to help check the triangle wound is counter-clockwise (positive),
+// or clockwise (negative)
+// ---
+// This function will return the signed area of the triangle formed by three points
 inline double tri_signed(const Point& O,const Point& A,const Point& B){
     return 0.5*cross2(O,A,B);
 }
+
+// This function helps to check if a point P lies on the line segment of A to B
+// using a bounding-box containment with an EPS margin.
+// This function is only called in degenerate solutions where three points are already known
+// to be collinear.
 inline bool on_seg(const Point& A,const Point& B,const Point& P){
     return std::min(A.x,B.x)-EPS<=P.x&&P.x<=std::max(A.x,B.x)+EPS&&
            std::min(A.y,B.y)-EPS<=P.y&&P.y<=std::max(A.y,B.y)+EPS;
 }
+
+// This function helps to determine if the segment of Point 1 -> Point 2 intersects
+// with the segment of Point 3 - Point 4 in any way.
+// It handles a normal crossing case, all degenerate cases like endpoints touching and
+// collinear overlaps. This function is the core test used in the topology check before every collapse
 bool segs_intersect(const Point& p1,const Point& p2,
                     const Point& p3,const Point& p4){
     double d1=cross2(p3,p4,p1),d2=cross2(p3,p4,p2);
@@ -93,14 +122,31 @@ bool segs_intersect(const Point& p1,const Point& p2,
     if(std::abs(d4)<EPS&&on_seg(p1,p2,p4))return true;
     return false;
 }
+
+// This function helps to calculate the perpendicular distance from point P to
+// the infinite extended line passing through Points A and B
+// This function is later used in the function "placement_func" to decide
+// whcih of 2 line segments to intersect with the E-line when placing the Steiner point
 inline double dist_pt_line(const Point& P,const Point& A,const Point& B){
     double dx=B.x-A.x,dy=B.y-A.y,len=std::sqrt(dx*dx+dy*dy);
     if(len<EPS) return std::hypot(P.x-A.x,P.y-A.y);
     return std::abs((P.x-A.x)*dy-(P.y-A.y)*dx)/len;
 }
+
+// This function helps to determine which side of the directed line of Point A -> Point B
+// the point P is on. This function serves as a wrapper around the functions "cross2" and "sgn"
+// ---
+// This function will return +1 for P being on the left side, -1 for right side and
+// 0 for if P is on the line.
 inline int side_of(const Point& P,const Point& A,const Point& B){
     return sgn(cross2(A,B,P));
 }
+
+// This function helps to compute the signed area of a polygon given a plain vector of points
+// which uses the shoelace formula to compute
+// ---
+// If the function returns a positive value, it is counter-clockwise, meaning its the exterior ring
+// and negative being clockwise meaning its the hole
 double signed_area_vec(const std::vector<Point>& pts){
     double s=0; int n=(int)pts.size();
     for(int i=0;i<n;++i){int j=(i+1)%n;s+=pts[i].x*pts[j].y-pts[j].x*pts[i].y;}
@@ -110,15 +156,17 @@ double signed_area_vec(const std::vector<Point>& pts){
 // ─── node ────────────────────────────────────────────────────────────────────
 
 static int g_seg_ctr=0;
+// This is just a global counter for ID'ing keys in the segment index where it will increase
+// whenever it is load time or a Steiner node is inserted with O(1) of insert and remove
 inline int fresh_seg(){return ++g_seg_ctr;}
 
 struct Node{
-    Point p;
-    int ring_id,orig_vid;
-    bool alive;
-    int gen;       // bumped when neighbourhood changes
-    int seg_id;    // id of segment this→next
-    Node*prev,*next;
+    Point p;                        // 2D coordinates of vertex
+    int ring_id,orig_vid;           // which ring the node belongs / original vertex id from input
+    bool alive;                     // false if node is removed by collapse
+    int gen;                        // counter to track when this node's neighbourhood is restructured
+    int seg_id;                     // a unique ID of the segment this->next
+    Node*prev,*next;                // the double-linked list that points to previous and next nodes
     Node(const Point&pt,int rid,int vid)
         :p(pt),ring_id(rid),orig_vid(vid),alive(true),
          gen(0),seg_id(fresh_seg()),prev(nullptr),next(nullptr){}
@@ -126,11 +174,13 @@ struct Node{
 
 // ─── ring ────────────────────────────────────────────────────────────────────
 
+// This helps to bookkeep for one ring
 struct Ring{
-    int ring_id,n_live;
-    double target_area;   // signed shoelace area of original ring
-    Node*head;
-    static constexpr int MIN_V=3;
+    int ring_id,n_live;     // ring_id identifies which ring it is, n_live tracks the number of vertices currently alive
+    double target_area;     // signed shoelace area of original ring
+    Node*head;              // pointer to any live node in the ring 
+    static constexpr int MIN_V=3;   // this is the minimum number of vertices a ring can have
+                                    // 3 being a triangle as it is the smallest polygon
 };
 
 // ─── segment index ───────────────────────────────────────────────────────────
@@ -139,8 +189,10 @@ struct Ring{
 
 struct SegIndex{
     std::unordered_map<int,Node*>table;
-    void insert(Node*nd){table[nd->seg_id]=nd;}
-    void remove(int sid){table.erase(sid);}
+    void insert(Node*nd){table[nd->seg_id]=nd;}     // this registers the segment nd->(nd->next) using the hash map
+    void remove(int sid){table.erase(sid);}         // this removes the segment with the given ID from the hash map
+
+    // this function help to find all the live segments whose axis-aligned bounding bos overlaps with the query rectangle
     std::vector<Node*>query(double xlo,double xhi,double ylo,double yhi,
                             const std::set<int>&excl)const{
         std::vector<Node*>res;res.reserve(16);
@@ -156,6 +208,7 @@ struct SegIndex{
 };
 
 // ─── placement function  (Kronenfeld et al. §Methods) ────────────────────────
+// These implement the core mathematical contribution of the APSC algorithm — finding where to place the Steiner point E.
 /*
  * E-line: a·x + b·y + c = 0, parallel to AD.
  * Any E on this line preserves the signed shoelace area of the ring exactly.
@@ -171,11 +224,20 @@ struct SegIndex{
  *     use AB if dist(B,AD) > dist(C,AD), else use CD.
  * Fallback: project midpoint(B,C) onto E-line (provably preserves area).
  */
+
+// this helps to compute the coefficients of the E-line which is the infinite line that is parallel
+// to the segment AD. Any point E that is placed on this line will exactly preserve the signed shoelace area
+// of the ring.
+// ---
+// The formula for calculating 'c' is from Equation 1 of the Kronenfeld paper
+// 'a' and 'b' are just for the coomponnets of the direction perpendicular to AD
 void e_line_coeffs(const Point&A,const Point&B,const Point&C,const Point&D,
                    double&a,double&b,double&c){
     a=D.y-A.y; b=A.x-D.x;
     c=-B.y*A.x+(A.y-C.y)*B.x+(B.y-D.y)*C.x+C.y*D.x;
 }
+
+// This function if the line segment intersect with the E-line or not
 bool intersect_e_line(double a,double b,double c,
                       const Point&P,const Point&Q,Point&out){
     double dx=Q.x-P.x,dy=Q.y-P.y,den=a*dx+b*dy;
@@ -184,6 +246,11 @@ bool intersect_e_line(double a,double b,double c,
     out={P.x+t*dx,P.y+t*dy};
     return true;
 }
+
+// This function is the main function for the APSC algorithm
+// Given the four consecutive vertices A, B, C, D in a ring, it decides where to place the Steiner point E so that:
+// 1. E lies on the E-line (guaranteeing area preservation), and
+// 2. The total areal displacement — the area swept between the old path A→B→C→D and the new path A→E→D — is minimised.
 bool placement_func(const Point&A,const Point&B,const Point&C,const Point&D,Point&E){
     double a,b,c; e_line_coeffs(A,B,C,D,a,b,c);
     if(std::abs(a)<EPS&&std::abs(b)<EPS){
@@ -212,6 +279,10 @@ bool placement_func(const Point&A,const Point&B,const Point&C,const Point&D,Poin
     E={m.x+a*t,m.y+b*t};
     return true;
 }
+
+// This function helps to return the total unsigned area displaced by the collapse
+// This is the sum of the triangle ABE and the area of triangle ECD. As E is on the E-line,
+// these two triangle areas are always equal to each other and the sum is that the priority queue minimises
 inline double displacement(const Point&A,const Point&B,const Point&C,
                            const Point&D,const Point&E){
     // Two triangular wedge areas: left=|tri(A,B,E)|, right=|tri(E,C,D)|.
@@ -236,6 +307,8 @@ struct Candidate{
 using Heap=std::priority_queue<Candidate,std::vector<Candidate>,
                                 std::greater<Candidate>>;
 
+// This function builds a candidate struct for the 4-vertex window centred on node B.
+//It reads B's predecessor A, B's successor C, and C's successor D, then calls "placement_func" to get E and "displacement" to get the cost.
 std::optional<Candidate> make_candidate(Node*B){
     if(!B->alive)return std::nullopt;
     Node*A=B->prev,*C=B->next;
@@ -290,7 +363,9 @@ double do_collapse(Node*A,Node*B,Node*C,Node*D,const Point&E,
 }
 
 // ─── ring traversal utilities ────────────────────────────────────────────────
-
+// This function traverses the entire linked list of a ring and computes its signed shoelace area
+// by walking from 'head' around back to 'head'. This is used later to verify is the area
+// is preserved and to write the ouput
 double ring_signed_area(const Ring&r){
     double s=0; Node*cur=r.head;
     do{Node*n=cur->next;s+=cur->p.x*n->p.y-n->p.x*cur->p.y;cur=n;}while(cur!=r.head);
@@ -305,6 +380,13 @@ struct Polygon{
     double input_total_signed_area=0;
 };
 
+// Function helps to read the input CSV file.
+// It parses each line into (ring_id, vertex_id, x, y), 
+// groups vertices by ring, sorts them by vertex_id, 
+// then for each ring: computes the target area, 
+// builds a Node for every vertex, 
+// links them into a circular doubly-linked list, and creates a Ring struct. 
+// It also accumulates input_total_signed_area for the summary footer.
 Polygon read_csv(const std::string& fileName){
     std::string path = "./Input_Files/" + fileName;
     std::ifstream f(path);
@@ -339,6 +421,7 @@ Polygon read_csv(const std::string& fileName){
     return poly;
 }
 
+// This is used to track the total vertex count during the simplification loop
 int total_live(const Polygon&poly){int t=0;for(Ring*r:poly.rings)t+=r->n_live;return t;}
 
 // Write CSV with full double precision, then append summary lines.
@@ -364,6 +447,18 @@ void write_output(const Polygon&poly,double total_displacement,std::ostream&out)
 
 // ─── simplification loop ─────────────────────────────────────────────────────
 
+// This is the main loop. It:
+
+// 1. Builds the segment index by inserting every live segment.
+// 2. Seeds the heap with one candidate per vertex (for every valid four-vertex window).
+// 3. Repeatedly pops the cheapest candidate and runs four checks:
+//      Staleness: is B dead? Did B's generation change? Did the structural neighbourhood (A, C, D pointers) drift due to prior collapses? If any check fails the candidate is discarded.
+//      Minimum vertices: does the ring still have more than 3 live vertices? If not, this ring cannot be simplified further.
+//      E recomputation: E is recalculated fresh from current ABCD coordinates. This is essential — a candidate can be structurally valid (all pointers match) but still have a stale E value if D was previously a different node whose position happened to match the new Steiner node's pointer. Recomputing E costs one function call but guarantees area preservation.
+//      Topology safety: calls is_safe to check for crossing edges.
+// 4. If all checks pass, calls do_collapse and decrements current.
+// 5. Stops when current <= target_n or the heap is empty.
+// 6. Prints a diagnostic summary to stderr and returns the total accumulated displacement.
 double simplify(Polygon&poly,int target_n){
     int current=total_live(poly);
     if(current<=target_n){
@@ -395,19 +490,24 @@ double simplify(Polygon&poly,int target_n){
         total_disp+=do_collapse(cand.A,cand.B,cand.C,cand.D,E,*ring,idx,heap);
         ++nc;--current;
     }
-    std::cerr<<"Collapses: "<<nc<<"  Stale: "<<ns
-             <<"  Topo-blocked: "<<nt<<"  Min-verts: "<<nm<<"\n"
-             <<"Final vertex count: "<<total_live(poly)<<"\n";
-    for(Ring*ring:poly.rings){
-        double act=ring_signed_area(*ring),err=std::abs(act-ring->target_area);
-        std::cerr<<"  Ring "<<ring->ring_id<<": target="<<ring->target_area
-                 <<"  actual="<<act<<"  |err|="<<err<<"\n";
-    }
+    // std::cerr<<"Collapses: "<<nc<<"  Stale: "<<ns
+    //          <<"  Topo-blocked: "<<nt<<"  Min-verts: "<<nm<<"\n"
+    //          <<"Final vertex count: "<<total_live(poly)<<"\n";
+    // for(Ring*ring:poly.rings){
+    //     double act=ring_signed_area(*ring),err=std::abs(act-ring->target_area);
+    //     std::cerr<<"  Ring "<<ring->ring_id<<": target="<<ring->target_area
+    //              <<"  actual="<<act<<"  |err|="<<err<<"\n";
+    // }
     return total_disp;
 }
 
 // ─── profiling (synthetic large polygon) ─────────────────────────────────────
 
+// Generates synthetic test polygons of increasing size (500, 2000, 8000, 32000 vertices) 
+// and measures how long simplify takes to reduce each to 10% of its original vertex count. 
+// Each polygon is a near-circle with small sinusoidal bumps added to avoid degenerate collinear configurations. 
+// The function builds the full data structure by hand (no CSV loading), runs simplify, 
+// records the elapsed time, then frees all allocated nodes before moving to the next size.
 void run_profile(){
     auto make_ring=[](int N,double R)->std::vector<Point>{
         std::vector<Point>pts;pts.reserve(N);
@@ -430,12 +530,12 @@ void run_profile(){
         Polygon poly;poly.rings.push_back(ring);poly.by_id[0]=ring;
         poly.input_total_signed_area=ring->target_area;
         int target=std::max(Ring::MIN_V,(int)(N*0.1));
-        auto t0=std::chrono::high_resolution_clock::now();
+        // auto t0=std::chrono::high_resolution_clock::now();
         double disp=simplify(poly,target);
-        auto t1=std::chrono::high_resolution_clock::now();
-        double ms=std::chrono::duration<double,std::milli>(t1-t0).count();
-        std::cerr<<"Profile N="<<N<<" -> "<<target<<" verts: "<<ms
-                 <<" ms  disp="<<disp<<"\n\n";
+        // auto t1=std::chrono::high_resolution_clock::now();
+        // double ms=std::chrono::duration<double,std::milli>(t1-t0).count();
+        // std::cerr<<"Profile N="<<N<<" -> "<<target<<" verts: "<<ms
+        //          <<" ms  disp="<<disp<<"\n\n";
         Node*cur=ring->head;
         do{Node*nx=cur->next;delete cur;cur=nx;}while(cur!=ring->head);
         delete ring;
@@ -449,23 +549,22 @@ int main(int argc,char*argv[]){
         run_profile();return 0;
     }
     if(argc<3){
-        std::cerr<<"Usage: "<<argv[0]<<" <input.csv> <target_vertices>\n"
-                 <<"       "<<argv[0]<<" --profile\n";
+        std::cerr<<"Usage: "<<argv[0]<<" <input.csv> <target_vertices>\n";
         return 1;
     }
     int target_n=std::atoi(argv[2]);
-    auto t0=std::chrono::high_resolution_clock::now();
+    // auto t0=std::chrono::high_resolution_clock::now();
     Polygon poly=read_csv(argv[1]);
     int total_min=0;for([[maybe_unused]]Ring*r:poly.rings)total_min+=Ring::MIN_V;
-    std::cerr<<"Loaded: "<<poly.rings.size()<<" ring(s), "<<total_live(poly)<<" vertices\n";
-    for(Ring*r:poly.rings)
-        std::cerr<<"  Ring "<<r->ring_id<<": "<<r->n_live
-                 <<" verts, area="<<r->target_area<<"\n";
-    std::cerr<<"Target: "<<target_n<<"  (min feasible: "<<total_min<<")\n\n";
+    // std::cerr<<"Loaded: "<<poly.rings.size()<<" ring(s), "<<total_live(poly)<<" vertices\n";
+    // for(Ring*r:poly.rings)
+    //     std::cerr<<"  Ring "<<r->ring_id<<": "<<r->n_live
+    //              <<" verts, area="<<r->target_area<<"\n";
+    // std::cerr<<"Target: "<<target_n<<"  (min feasible: "<<total_min<<")\n\n";
     double total_disp=simplify(poly,target_n);
-    auto t1=std::chrono::high_resolution_clock::now();
-    std::cerr<<"Wall time: "
-             <<std::chrono::duration<double,std::milli>(t1-t0).count()<<" ms\n";
+    // auto t1=std::chrono::high_resolution_clock::now();
+    // std::cerr<<"Wall time: "
+    //          <<std::chrono::duration<double,std::milli>(t1-t0).count()<<" ms\n";
     write_output(poly,total_disp,std::cout);
     return 0;
 }
